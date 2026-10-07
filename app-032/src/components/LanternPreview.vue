@@ -3,11 +3,17 @@
 import { computed, ref } from 'vue'
 import type { Lantern } from '../core/types'
 import { buildGeometry, radiusAtY, segmentInfos, topShoulder } from '../core/geometry'
+import type { LashPlan } from '../core/lashing'
+import { FOOTPRINT_MM } from '../core/lashing'
 
 const props = defineProps<{
   lantern: Lantern
   mode: 'front' | 'top' | 'iso'
   interactive?: boolean
+  /** 绑扎节点图叠加：节点与扎道只取这同一份 LashPlan */
+  lashing?: LashPlan | null
+  /** 是否显示绕线包络（相压判定半径） */
+  showFootprint?: boolean
 }>()
 const emit = defineEmits<{ (e: 'update-ctrl', v: { which: 1 | 2; x: number; y: number }): void }>()
 
@@ -77,6 +83,46 @@ const rings = computed(() => {
     r: s.radiusMm,
     label: s.index === 0 ? '底' : s.index === geo.sections.length - 1 ? '口' : String(s.index)
   }))
+})
+
+/** 绑扎节点叠加（正视图：x/y 投影；俯视另有一组）。坐标全部来自 LashPlan，不另算 */
+const lashFront = computed(() => {
+  const plan = props.lashing
+  if (!plan) return []
+  return plan.nodes.map((nd) => ({
+    code: nd.code,
+    cx: sx(nd.xMm),
+    cy: sy(nd.yMm),
+    ties: nd.ties,
+    crossBand: !!nd.crossBand,
+    deadlock: plan.deadlocks.some((d) => d.nodeKey === nd.primaryKey),
+    shifted: !!nd.shifted,
+    kind: nd.kind,
+    label: nd.label
+  }))
+})
+
+const lashTop = computed(() => {
+  const plan = props.lashing
+  if (!plan) return []
+  return plan.nodes.map((nd) => ({
+    code: nd.code,
+    cx: nd.xMm,
+    cy: nd.zMm,
+    ties: nd.ties,
+    deadlock: plan.deadlocks.some((d) => d.nodeKey === nd.primaryKey)
+  }))
+})
+
+/** 等轴测节点投影（与 isoProjection 同套投影） */
+const lashIso = computed(() => {
+  const plan = props.lashing
+  const p = isoProjection.value
+  if (!plan) return []
+  return plan.nodes.map((nd) => {
+    const q = p.proj({ x: nd.xMm, y: nd.yMm, z: nd.zMm })
+    return { code: nd.code, X: q.X, Y: q.Y, ties: nd.ties, deadlock: plan.deadlocks.some((d) => d.nodeKey === nd.primaryKey) }
+  })
 })
 
 /** 棱柱可见棱线（前后面投影） */
@@ -252,6 +298,38 @@ const isoPaths = computed(() => {
         />
       </g>
 
+      <!-- 绑扎节点图（与构件表/工步清单同一份 LashPlan） -->
+      <g v-if="lashing" class="lash">
+        <circle
+          v-for="nd in lashFront"
+          :key="'fp' + nd.code"
+          :cx="nd.cx"
+          :cy="nd.cy"
+          :r="showFootprint ? FOOTPRINT_MM : 2.6"
+          class="lash-foot"
+          :class="{ dead: nd.deadlock, shifted: nd.shifted }"
+        />
+        <circle
+          v-for="nd in lashFront"
+          :key="'nd' + nd.code"
+          :cx="nd.cx"
+          :cy="nd.cy"
+          r="1.7"
+          class="lash-node"
+          :class="{ dead: nd.deadlock }"
+        />
+        <text
+          v-for="nd in lashFront"
+          :key="'tx' + nd.code"
+          :x="nd.cx + 3.4"
+          :y="nd.cy - 3"
+          class="lash-label"
+          :class="{ dead: nd.deadlock }"
+        >
+          {{ nd.code }}·{{ nd.ties }}道
+        </text>
+      </g>
+
       <!-- 尺寸标注 -->
       <g class="dim">
         <line :x1="sx(-g.maxR)" :x2="sx(g.maxR)" :y1="FRONT_H - 16" :y2="FRONT_H - 16" />
@@ -348,6 +426,19 @@ const isoPaths = computed(() => {
             />
           </template>
         </g>
+        <!-- 绑扎节点俯视：坐标取自同一份 LashPlan -->
+        <g v-if="lashing" class="lash-top">
+          <circle
+            v-for="nd in lashTop"
+            :key="'tp' + nd.code"
+            :cx="nd.cx"
+            :cy="nd.cy"
+            :r="showFootprint ? FOOTPRINT_MM : 2.2"
+            class="lash-foot"
+            :class="{ dead: nd.deadlock }"
+          />
+          <circle v-for="nd in lashTop" :key="'tn' + nd.code" :cx="nd.cx" :cy="nd.cy" r="1.3" class="lash-node" :class="{ dead: nd.deadlock }" />
+        </g>
         <text :x="0" :y="-g.maxR - 16" text-anchor="middle" class="dim-text">
           俯视 · 外接 ⌀{{ (g.maxR * 2).toFixed(1) }}mm / {{ g.polygon ? g.n + ' 棱' : '旋转体' }}
         </text>
@@ -375,6 +466,17 @@ const isoPaths = computed(() => {
         stroke="rgba(122,43,28,0.35)"
         stroke-width="0.5"
       />
+      <g v-if="lashing" class="lash-iso">
+        <circle
+          v-for="nd in lashIso"
+          :key="'in' + nd.code"
+          :cx="nd.X"
+          :cy="nd.Y"
+          r="2"
+          class="lash-node"
+          :class="{ dead: nd.deadlock }"
+        />
+      </g>
       <text :x="isoProjection.minX + 12" :y="isoProjection.minY + 16" class="dim-text">
         等轴测示意（骨架线框，非 3D 渲染）
       </text>
@@ -472,5 +574,44 @@ const isoPaths = computed(() => {
 .dim-text {
   font-size: 8px;
   fill: #6a5c52;
+}
+
+.lash-foot {
+  fill: rgba(47, 95, 138, 0.08);
+  stroke: rgba(47, 95, 138, 0.55);
+  stroke-width: 0.3;
+  stroke-dasharray: 2 1.5;
+}
+
+.lash-node {
+  fill: #b3241f;
+  stroke: #fff6e8;
+  stroke-width: 0.5;
+}
+
+.lash-node.dead,
+.lash-foot.dead {
+  fill: rgba(179, 36, 31, 0.22);
+  stroke: #b3241f;
+  stroke-width: 0.9;
+}
+
+.lash-foot.shifted {
+  stroke: #b8891f;
+  fill: rgba(184, 137, 31, 0.12);
+}
+
+.lash-label {
+  font-size: 6.4px;
+  fill: #2f5f8a;
+}
+
+.lash-label.dead {
+  fill: #b3241f;
+  font-weight: 700;
+}
+
+.lash-top .lash-node {
+  fill: #b3241f;
 }
 </style>

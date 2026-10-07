@@ -63,9 +63,14 @@ export interface Lantern {
   pageSize: PageSize
   /** 长条图跨页搭接量（mm） */
   overlapMm: number
+  /** 绑扎节点合并方式：position=按空间位置合并（默认）；combination=按交会篾组合合并 */
+  lashingMerge?: LashMergeMode
   createdAt: string
   updatedAt: string
 }
+
+/** 节点合并二选一（规格书 §绑扎节点图） */
+export type LashMergeMode = 'position' | 'combination'
 
 export interface FrameMember {
   id: string
@@ -86,6 +91,10 @@ export interface FrameMember {
   group: string
   /** 每根含几处绑扎余量 */
   lashJoints: number
+  /** 所属横篾截面序号：0=底盘圈、末层=收口圈、中间为第 i 层（绑扎节点图取层号用） */
+  ringSection?: number
+  /** 附加构件角色（如收口支撑篾） */
+  role?: 'shoulder_ring'
   note?: string
 }
 

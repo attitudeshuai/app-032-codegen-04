@@ -65,6 +65,7 @@ export function createFromPreset(presetId: string): Lantern {
     wasteRatio: coveringSpec(p.covering).wasteRatio,
     pageSize: 'A4',
     overlapMm: CRAFT.defaultOverlapMm,
+    lashingMerge: 'position',
     createdAt: now,
     updatedAt: now
   }

@@ -6,6 +6,7 @@ import type { FrameMember, Lantern } from './types'
 import { bodySurfaceArea, bodyVolume, r1, r3 } from './geometry'
 import { buildFrame } from './frame'
 import { buildPanels } from './panels'
+import { buildLashing, type LashPlan } from './lashing'
 import { CRAFT, coveringSpec } from './craft'
 
 export interface SingleLightMaterials {
@@ -36,15 +37,17 @@ export interface BatchMaterials extends SingleLightMaterials {
   wasteRatio: number
 }
 
-export function computeMaterials(l: Lantern): SingleLightMaterials {
+export function computeMaterials(l: Lantern, plan?: LashPlan): SingleLightMaterials {
   const frame = buildFrame(l)
   const panelRes = buildPanels(l)
   const cov = coveringSpec(l.covering)
   const divisions = Math.max(3, Math.round(l.divisions))
 
+  // 扎道数与扎线用量只取自绑扎节点图这同一份 LashPlan（预览/构件表/导出同源）
+  const lash = plan ?? buildLashing(l)
+
   const frameMm = frame.members.reduce((s, m: FrameMember) => s + m.lengthMm * m.qty, 0)
   const frameRawMm = frame.members.reduce((s, m: FrameMember) => s + m.rawLengthMm * m.qty, 0)
-  const joints = frame.members.reduce((s, m: FrameMember) => s + m.qty * m.lashJoints, 0)
   const cutArea = panelRes.cutAreaMm2
   const volumeL = bodyVolume(frame.geometry) / 1_000_000
   const led = Math.max(CRAFT.led.min, Math.ceil(volumeL * CRAFT.led.perLiter))
@@ -54,9 +57,9 @@ export function computeMaterials(l: Lantern): SingleLightMaterials {
     frameRawM: r3(frameRawMm / 1000),
     coveringM2: r3(cutArea / 1_000_000),
     coveringNetM2: r3(panelRes.netAreaMm2 / 1_000_000),
-    lashM: r3(joints * CRAFT.lashPerJointM),
+    lashM: lash.totalWireM,
     glueG: r1((cutArea / 1_000_000) * cov.gluePerM2),
-    lashJoints: joints,
+    lashJoints: lash.totalTies,
     volumeL: r3(volumeL),
     ledCount: led,
     surfaceM2: r3(bodySurfaceArea(frame.geometry, divisions) / 1_000_000)

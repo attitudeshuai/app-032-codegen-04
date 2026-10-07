@@ -80,6 +80,7 @@ export function buildFrame(l: Lantern): FrameResult {
         lengthMm: r1(edge + lash),
         qty: n,
         lashJoints: 1,
+        ringSection: i,
         bendAngleDeg: r1(bendAngle),
         group: `横篾（第 ${i} 层）`,
         note: `圈直径 ${r1(r * 2)}mm，合围 ${n} 根，含 1 处接头余量`
@@ -96,6 +97,7 @@ export function buildFrame(l: Lantern): FrameResult {
       lengthMm: r1(topEdge + lash),
       qty: n,
       lashJoints: 1,
+      ringSection: g.sections.length - 1,
       bendAngleDeg: r1(bendAngle),
       bendRadiusMm: r1(shoulderBendRadius(g.maxR - topR, g.heightMm * g.kTop)),
       group: '收口圈',
@@ -108,6 +110,7 @@ export function buildFrame(l: Lantern): FrameResult {
       lengthMm: r1(botEdge + lash),
       qty: n,
       lashJoints: 1,
+      ringSection: 0,
       bendAngleDeg: r1(bendAngle),
       bendRadiusMm: r1(shoulderBendRadius(g.maxR - botR, g.heightMm * g.kBot)),
       group: '底盘圈',
@@ -158,6 +161,7 @@ export function buildFrame(l: Lantern): FrameResult {
         lengthMm: r1(circ + lash),
         qty: 1,
         lashJoints: 1,
+        ringSection: i,
         bendRadiusMm: r1(r),
         group: `横篾圈（第 ${i} 层）`,
         note: `圈直径 ${r1(r * 2)}mm，圆形圈 1 处接头`
@@ -172,6 +176,7 @@ export function buildFrame(l: Lantern): FrameResult {
       lengthMm: r1(TAU * topR + lash),
       qty: 1,
       lashJoints: 1,
+      ringSection: g.sections.length - 1,
       bendRadiusMm: r1(topR),
       group: '收口圈',
       note: `圈直径 ${r1(topR * 2)}mm，弯曲半径 = 口径/2 = ${r1(topR)}mm`
@@ -183,6 +188,7 @@ export function buildFrame(l: Lantern): FrameResult {
       lengthMm: r1(TAU * botR + lash),
       qty: 1,
       lashJoints: 1,
+      ringSection: 0,
       bendRadiusMm: r1(botR),
       group: '底盘圈',
       note: `圈直径 ${r1(botR * 2)}mm`
@@ -195,6 +201,7 @@ export function buildFrame(l: Lantern): FrameResult {
         lengthMm: r1(TAU * ((topR + g.maxR) / 2) + lash),
         qty: 1,
         lashJoints: 1,
+        role: 'shoulder_ring',
         bendRadiusMm: r1(shoulderBendRadius(g.maxR - topR, g.heightMm * g.kTop)),
         group: '收口圈',
         note: '撑起收口肩部曲线，弯曲半径由收口口径与收口段高决定'

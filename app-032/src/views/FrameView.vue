@@ -19,6 +19,11 @@ const full = computed(() => {
   return computeAll(l, { ...DEFAULT_LOFT_OPTIONS, paper: l.pageSize, overlapMm: l.overlapMm })
 })
 const groups = computed(() => (full.value ? groupMembers(full.value.frame.members) : []))
+const lashRow = computed(() => {
+  const map = new Map<string, { nodes: number; ties: number; wireM: number }>()
+  if (full.value) for (const r of full.value.lashing.rows) map.set(r.rowKey, r)
+  return map
+})
 
 function bendText(m: FrameMember): string {
   if (m.bendRadiusMm) return `R${m.bendRadiusMm.toFixed(1)}mm`
@@ -29,7 +34,7 @@ function bendText(m: FrameMember): string {
 function exportCsv() {
   const l = lantern.value
   if (!l || !full.value) return
-  downloadText(`${l.name}-构件清单.csv`, membersCsv(l, full.value.frame.members))
+  downloadText(`${l.name}-构件清单.csv`, membersCsv(l, full.value.frame.members, full.value.lashing))
 }
 </script>
 
@@ -58,6 +63,8 @@ function exportCsv() {
       <div class="stat"><span>备料总长（含余量）</span><b>{{ (full.frame.stockLengthMm / 1000).toFixed(3) }} m</b></div>
       <div class="stat"><span>净长合计</span><b>{{ (full.frame.rawLengthMm / 1000).toFixed(3) }} m</b></div>
       <div class="stat"><span>绑扎余量合计</span><b>{{ full.frame.lashExtraMm.toFixed(1) }} mm</b></div>
+      <div class="stat"><span>绑扎节点 / 扎道</span><b>{{ full.lashing.nodeCount }} 处 · {{ full.lashing.totalTies }} 道</b></div>
+      <div class="stat"><span>扎线合计 / 工步</span><b>{{ full.lashing.totalWireM.toFixed(3) }} m · {{ full.lashing.stepCount }} 步</b></div>
     </section>
 
     <section v-for="grp in groups" :key="grp.group" class="group">
@@ -72,6 +79,9 @@ function exportCsv() {
             <th class="num">余量处数</th>
             <th class="num">数量</th>
             <th class="num">总截取长 (mm)</th>
+            <th class="num">参与节点 (处)</th>
+            <th class="num">扎道 (道)</th>
+            <th class="num">扎线 (m)</th>
             <th>弯曲半径 / 折角</th>
             <th>说明</th>
           </tr>
@@ -85,6 +95,9 @@ function exportCsv() {
             <td class="num mono">×{{ m.lashJoints }}</td>
             <td class="num mono">{{ m.qty }}</td>
             <td class="num mono">{{ (m.lengthMm * m.qty).toFixed(1) }}</td>
+            <td class="num mono">{{ lashRow.get(m.id)?.nodes ?? '—' }}</td>
+            <td class="num mono strong">{{ lashRow.get(m.id)?.ties ?? 0 }}</td>
+            <td class="num mono">{{ (lashRow.get(m.id)?.wireM ?? 0).toFixed(3) }}</td>
             <td class="mono small">{{ bendText(m) }}</td>
             <td class="note">{{ m.note }}</td>
           </tr>
@@ -93,9 +106,9 @@ function exportCsv() {
     </section>
 
     <ChecksPanel
-      :checks="full.checks.filter((c) => ['CHK-01', 'CHK-02', 'CHK-04', 'CHK-08'].includes(c.id))"
+      :checks="full.checks.filter((c) => ['CHK-01', 'CHK-02', 'CHK-04', 'CHK-08', 'CHK-09'].includes(c.id))"
       :elapsed-ms="full.elapsedMs"
-      title="骨架计算自检"
+      title="骨架与扎线计算自检"
     />
   </div>
 </template>

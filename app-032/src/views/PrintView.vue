@@ -25,7 +25,7 @@ import { kindName, shapeName } from '../core/exporter'
 import { coveringLabel, kindLabel, styleLabel } from '../core/craft'
 import type { Panel } from '../core/types'
 
-type PrintMode = 'loft' | 'frame' | 'labels'
+type PrintMode = 'loft' | 'frame' | 'labels' | 'lashing'
 
 const route = useRoute()
 const router = useRouter()
@@ -33,7 +33,7 @@ const router = useRouter()
 const lantern = computed(() => getLantern(route.params.id as string))
 const mode = computed<PrintMode>(() => {
   const v = String(route.query.view || 'loft')
-  return v === 'frame' || v === 'labels' ? v : 'loft'
+  return v === 'frame' || v === 'labels' || v === 'lashing' ? v : 'loft'
 })
 
 const opts = reactive<LoftOptions>({ ...DEFAULT_LOFT_OPTIONS })
@@ -107,6 +107,26 @@ function setMode(m: PrintMode) {
 
 function doPrint() {
   window.print()
+}
+
+/** 绑扎工步打印：层带分组 */
+const lashBands = computed(() => {
+  const p = full.value?.lashing
+  if (!p) return []
+  const out: { name: string; steps: typeof p.steps }[] = []
+  for (const s of p.steps) {
+    let g = out.find((x) => x.name === s.bandName)
+    if (!g) {
+      g = { name: s.bandName, steps: [] }
+      out.push(g)
+    }
+    g.steps.push(s)
+  }
+  return out
+})
+
+function lashNode(code: string) {
+  return full.value?.lashing.nodes.find((n) => n.code === code)
 }
 
 const asPanel = (it: SheetItem): SheetItemPanel => it as SheetItemPanel
@@ -235,6 +255,7 @@ function today(): string {
       <div class="tabs">
         <button :class="{ on: mode === 'loft' }" @click="setMode('loft')">1:1 放样图</button>
         <button :class="{ on: mode === 'frame' }" @click="setMode('frame')">构件清单（可打印）</button>
+        <button :class="{ on: mode === 'lashing' }" @click="setMode('lashing')">绑扎工步清单（可打印）</button>
         <button :class="{ on: mode === 'labels' }" @click="setMode('labels')">裁片标签</button>
       </div>
 
@@ -589,13 +610,16 @@ function today(): string {
             <th class="num">余量处数</th>
             <th class="num">数量</th>
             <th class="num">总截取长 (mm)</th>
+            <th class="num">参与节点</th>
+            <th class="num">扎道</th>
+            <th class="num">扎线(m)</th>
             <th>弯曲半径 / 折角</th>
           </tr>
         </thead>
         <tbody>
           <template v-for="grp in frameGroups" :key="grp.group">
             <tr class="doc-group">
-              <td colspan="9">{{ grp.group }}</td>
+              <td colspan="12">{{ grp.group }}</td>
             </tr>
             <tr v-for="m in grp.items" :key="m.id">
               <td>{{ m.label }}</td>
@@ -606,6 +630,9 @@ function today(): string {
               <td class="num mono">×{{ m.lashJoints }}</td>
               <td class="num mono">{{ m.qty }}</td>
               <td class="num mono">{{ f1(m.lengthMm * m.qty) }}</td>
+              <td class="num mono">{{ full.lashing.rows.find((r) => r.rowKey === m.id)?.nodes ?? '—' }}</td>
+              <td class="num mono strong">{{ full.lashing.rows.find((r) => r.rowKey === m.id)?.ties ?? 0 }}</td>
+              <td class="num mono">{{ (full.lashing.rows.find((r) => r.rowKey === m.id)?.wireM ?? 0).toFixed(3) }}</td>
               <td class="mono">{{ m.bendRadiusMm ? `R${f1(m.bendRadiusMm)}mm` : m.bendAngleDeg ? `${f1(m.bendAngleDeg)}°` : '—' }}</td>
             </tr>
           </template>
@@ -614,8 +641,92 @@ function today(): string {
       <p class="doc-foot">
         合计：构件 {{ full.frame.totalQty }} 根 · 备料（含余量）{{ (full.frame.stockLengthMm / 1000).toFixed(3) }}m ·
         净长 {{ (full.frame.rawLengthMm / 1000).toFixed(3) }}m · 绑扎余量合计
-        {{ f1(full.frame.lashExtraMm) }}mm
+        {{ f1(full.frame.lashExtraMm) }}mm · 扎道 {{ full.lashing.totalTies }} 道 /
+        扎线 {{ full.lashing.totalWireM.toFixed(3) }}m（与绑扎工步清单同一份取数，版本 {{ full.lashing.signature }}）
       </p>
+    </section>
+
+    <!-- ============ 绑扎工步清单（可打印） ============ -->
+    <section v-else-if="mode === 'lashing'" class="doc lash-doc">
+      <h1>绑扎节点图与工步清单</h1>
+      <p class="doc-meta">
+        灯样：{{ lantern.name }}（{{ kindLabel(lantern.kind) }}）· 最大直径 {{ lantern.maxDiameterMm }}mm · 总高
+        {{ lantern.totalHeightMm }}mm · {{ lantern.layers.length }} 层 · {{ lantern.sides }} 棱 ·
+        节点合并：{{ full.lashing.mode === 'position' ? '按空间位置合并' : '按交会篾组合合并' }} ·
+        版本 <span class="mono">{{ full.lashing.signature }}</span> · 打印日期 {{ today() }}<br />
+        位置精度 mm（1 位小数），去重按 1mm 落格；每道扎线 0.5m；本页与参数预览、骨架构件表、CSV 导出同一份取数。
+      </p>
+
+      <p class="doc-foot">
+        合计：节点 <b>{{ full.lashing.nodeCount }}</b> 处 · 扎道 <b>{{ full.lashing.totalTies }}</b> 道 ·
+        扎线 <b>{{ full.lashing.totalWireM.toFixed(3) }}m（{{ (full.lashing.totalWireM * 100).toFixed(1) }}cm）</b> ·
+        工步 <b>{{ full.lashing.stepCount }}</b> 步 · 余量处数
+        {{ full.lashing.allowanceIncidences }}（构件表 {{ full.lashing.allowanceJointsFromFrame }}）
+      </p>
+
+      <p v-if="full.lashing.deadlocks.length" class="lash-deadlock-print">
+        ⚠ 本版存在 {{ full.lashing.deadlocks.length }} 处跨层并错卡死，不可直接施工；请回到「绑扎工步」页二选一解法后重新打印。
+      </p>
+
+      <template v-for="b in lashBands" :key="b.name">
+        <h2 class="band-title">{{ b.name }}</h2>
+        <table class="doc-table">
+          <thead>
+            <tr>
+              <th class="num">步</th>
+              <th>内容（同一格内可同时上）</th>
+              <th>节点编号 · 扎道</th>
+              <th class="num">节点</th>
+              <th class="num">扎道</th>
+              <th class="num">扎线(m)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="s in b.steps" :key="s.ordinal">
+              <td class="num mono strong">{{ s.ordinal }}</td>
+              <td>{{ s.title }}</td>
+              <td class="mono">
+                <span v-for="code in s.nodeCodes" :key="code" class="print-chip">{{ code }}·{{ lashNode(code)?.ties }}</span>
+              </td>
+              <td class="num mono">{{ s.nodeCodes.length }}</td>
+              <td class="num mono">{{ s.ties }}</td>
+              <td class="num mono">{{ s.wireM.toFixed(3) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </template>
+
+      <h2 class="band-title">节点坐标明细（mm）</h2>
+      <table class="doc-table">
+        <thead>
+          <tr>
+            <th>节点</th>
+            <th>层带</th>
+            <th class="num">棱</th>
+            <th>X</th>
+            <th>Y</th>
+            <th>Z</th>
+            <th>去重格</th>
+            <th class="num">扎道</th>
+            <th class="num">扎线(m)</th>
+            <th>交会篾</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="nd in full.lashing.nodes" :key="nd.primaryKey">
+            <td class="mono strong">{{ nd.code }}</td>
+            <td>{{ nd.bandName }}</td>
+            <td class="num">{{ nd.corner >= 0 ? nd.corner + 1 : '轴' }}</td>
+            <td class="num mono">{{ f1(nd.xMm) }}</td>
+            <td class="num mono">{{ f1(nd.yMm) }}</td>
+            <td class="num mono">{{ f1(nd.zMm) }}</td>
+            <td class="mono">({{ nd.gx }},{{ nd.gy }},{{ nd.gz }})</td>
+            <td class="num mono strong">{{ nd.ties }}</td>
+            <td class="num mono">{{ nd.wireM.toFixed(3) }}</td>
+            <td>{{ nd.memberLabels.join('、') }}</td>
+          </tr>
+        </tbody>
+      </table>
     </section>
 
     <!-- ============ 裁片标签 ============ -->
@@ -1049,6 +1160,31 @@ button.primary:hover {
   margin-top: 10px;
   font-size: 11px;
   color: var(--ink-soft);
+}
+
+.band-title {
+  margin: 12px 0 4px;
+  font-size: 13px;
+  color: #8f1c19;
+}
+
+.print-chip {
+  display: inline-block;
+  border: 0.2mm solid #c6b49b;
+  border-radius: 2mm;
+  padding: 0 1.2mm;
+  margin: 0.4mm;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.lash-deadlock-print {
+  color: #b3241f;
+  border: 0.3mm solid #d88;
+  background: #fdf1ef;
+  border-radius: 2mm;
+  padding: 2mm 3mm;
+  font-size: 11.5px;
 }
 
 .num {

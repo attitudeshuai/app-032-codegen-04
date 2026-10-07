@@ -14,6 +14,8 @@ import type { Lantern, Panel } from '../core/types'
 const route = useRoute()
 const lantern = computed(() => getLantern(route.params.id as string))
 const mode = ref<'front' | 'top' | 'iso'>('front')
+const showLash = ref(true)
+const showFootprint = ref(false)
 
 const loft = computed(() => ({
   ...DEFAULT_LOFT_OPTIONS,
@@ -324,6 +326,9 @@ function onCtrl(v: { which: 1 | 2; x: number; y: number }) {
         <button :class="{ on: mode === 'front' }" @click="mode = 'front'">正视图</button>
         <button :class="{ on: mode === 'top' }" @click="mode = 'top'">俯视图</button>
         <button :class="{ on: mode === 'iso' }" @click="mode = 'iso'">等轴测</button>
+        <label class="lash-toggle"><input type="checkbox" v-model="showLash" /> 绑扎节点与扎道</label>
+        <label class="lash-toggle"><input type="checkbox" v-model="showFootprint" /> 绕线包络（8mm 相压区）</label>
+        <router-link class="lash-link" :to="`/lashing/${lantern.id}`">绑扎工步清单 →</router-link>
         <span v-if="lantern.mouthStyle === 'gourd'" class="tip">拖动绿色控制点可改葫芦口曲线</span>
       </div>
 
@@ -331,6 +336,8 @@ function onCtrl(v: { which: 1 | 2; x: number; y: number }) {
         <LanternPreview
           :lantern="lantern"
           :mode="mode"
+          :lashing="showLash && full ? full.lashing : null"
+          :show-footprint="showFootprint"
           interactive
           @update-ctrl="onCtrl"
         />
@@ -338,6 +345,8 @@ function onCtrl(v: { which: 1 | 2; x: number; y: number }) {
 
       <div v-if="full" class="stats">
         <div class="stat"><span>构件总数</span><b>{{ full.frame.totalQty }}</b></div>
+        <div class="stat"><span>绑扎节点 / 扎道</span><b>{{ full.lashing.nodeCount }} 处 · {{ full.lashing.totalTies }} 道</b></div>
+        <div class="stat"><span>扎线用量 / 工步</span><b>{{ full.lashing.totalWireM.toFixed(3) }}m · {{ full.lashing.stepCount }} 步</b></div>
         <div class="stat"><span>竹篾备料</span><b>{{ full.materials.frameM.toFixed(3) }} m</b></div>
         <div class="stat"><span>净长合计</span><b>{{ full.materials.frameRawM.toFixed(3) }} m</b></div>
         <div class="stat"><span>裁片块数</span><b>{{ full.panels.totalQty }}</b></div>
@@ -592,6 +601,20 @@ button:hover {
   margin-left: auto;
   font-size: 12px;
   color: var(--jade);
+}
+
+.lash-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.lash-link {
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .canvas {

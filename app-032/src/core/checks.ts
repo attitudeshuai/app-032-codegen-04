@@ -8,6 +8,7 @@ import { buildFrame, type FrameResult } from './frame'
 import { buildPanels, panelNetArea, type PanelResult } from './panels'
 import { computeBatch, computeMaterials, type BatchMaterials, type SingleLightMaterials } from './materials'
 import { assertNoPanelSplit, paginate, type LoftOptions, type Sheet } from './paginate'
+import { buildLashing, FOOTPRINT_MM, MIN_LEVEL_GAP_MM, POS_GRID_MM, POS_TOL_MM, type LashPlan } from './lashing'
 import { CRAFT } from './craft'
 
 export interface FullResult {
@@ -16,6 +17,7 @@ export interface FullResult {
   materials: SingleLightMaterials
   batch: BatchMaterials
   sheets: Sheet[]
+  lashing: LashPlan
   checks: CheckResult[]
   elapsedMs: number
 }
@@ -27,12 +29,14 @@ export function computeAll(l: Lantern, loft: LoftOptions): FullResult {
   const t0 = performance.now()
   const frame = buildFrame(l)
   const panels = buildPanels(l)
-  const materials = computeMaterials(l)
+  // 绑扎节点图先算：扎道数、扎线用量是材料统计的唯一来源
+  const lashing = buildLashing(l)
+  const materials = computeMaterials(l, lashing)
   const batch = computeBatch(materials, Math.max(1, Math.round(l.batchCount)), l.wasteRatio)
   const sheets = paginate(l, loft)
   const elapsedMs = performance.now() - t0
-  const checks = runChecks(l, frame, panels, materials, batch, sheets, elapsedMs)
-  return { frame, panels, materials, batch, sheets, checks, elapsedMs }
+  const checks = runChecks(l, frame, panels, materials, batch, sheets, lashing, elapsedMs)
+  return { frame, panels, materials, batch, sheets, lashing, checks, elapsedMs }
 }
 
 function runChecks(
@@ -42,6 +46,7 @@ function runChecks(
   materials: SingleLightMaterials,
   batch: BatchMaterials,
   sheets: Sheet[],
+  lashing: LashPlan,
   elapsedMs: number
 ): CheckResult[] {
   const out: CheckResult[] = []
@@ -188,6 +193,71 @@ function runChecks(
       pass,
       value: `${elapsedMs.toFixed(1)}ms`,
       detail: `${l.divisions} 等分 × ${l.layers.length} 层：构件 ${frame.totalQty} 根、裁片 ${panels.totalQty} 块、图纸 ${sheets.length} 页，全流程耗时 ${elapsedMs.toFixed(1)}ms（含分页）`
+    })
+  }
+
+  // ---- CHK-09 扎线三处同源守恒：Σ节点扎道 = Σ工步扎道 = Σ构件行扎道 = 扎线总量/0.5m ----
+  {
+    const byNode = lashing.nodes.reduce((s, nd) => s + nd.ties, 0)
+    const byStep = lashing.steps.reduce((s, st) => s + st.ties, 0)
+    const byRow = lashing.rows.reduce((s, r) => s + r.ties, 0)
+    const byWire = Math.round(lashing.totalWireM / CRAFT.lashPerJointM)
+    const equal = byNode === byStep && byNode === byRow && byNode === byWire
+    const cm = (lashing.totalWireM * 100).toFixed(1)
+    // 余量处数记账：吃余量的端头/接头必须与构件表 Σqty×lashJoints 一致
+    const allowanceOk = lashing.allowanceIncidences === lashing.allowanceJointsFromFrame
+    out.push({
+      id: 'CHK-09',
+      title: '扎线守恒与三处同源：节点 = 工步 = 构件表 = 扎线总量（差 1cm 可见）',
+      pass: equal && allowanceOk,
+      value: `${byNode} 道 / ${cm}cm`,
+      detail:
+        `节点逐道 ${byNode}、工步合计 ${byStep}、构件表逐行 ${byRow}、扎线 ${lashing.totalWireM.toFixed(3)}m（${cm}cm）÷ ${CRAFT.lashPerJointM}m/道 = ${byWire} 道；` +
+        `余量处数（端头+接头）${lashing.allowanceIncidences} 处，构件表绑扎余量合计 ${lashing.allowanceJointsFromFrame} 处${allowanceOk ? '，一致' : '，不一致！'}。` +
+        `单位 m（3 位小数，0.001m=1cm），位置精度 mm（${POS_TOL_MM} 位小数），去重按 ${POS_GRID_MM}mm 落格。`
+    })
+  }
+
+  // ---- CHK-10 先后排程：卡死当场点出 + 两条解法 ----
+  {
+    if (lashing.deadlocks.length === 0) {
+      out.push({
+        id: 'CHK-10',
+        title: '绑扎先后：下层未完成不上层；同层绕线相压排成先后',
+        pass: true,
+        value: `${lashing.steps.length} 步排程无卡死`,
+        detail:
+          `共 ${lashing.stepCount} 个工步（自底向上 ${new Set(lashing.steps.map((s) => s.band)).size} 个层带），同一步内节点绕线包络（${FOOTPRINT_MM}mm）互不重叠、可同时上；` +
+          `相邻层绕线经过处距离 < ${FOOTPRINT_MM}mm 会被判互相压住并强制排先后。`
+      })
+    } else {
+      const d0 = lashing.deadlocks[0]
+      const f = lashing.fixes
+      out.push({
+        id: 'CHK-10',
+        title: '绑扎先后：检出相邻两层节点被并到同一处（互相卡住）',
+        pass: false,
+        value: `${lashing.deadlocks.length} 处卡死`,
+        detail:
+          `首处 ${d0.code} ${d0.posText}：${d0.placeA} 与 ${d0.placeB} 互相等先于对方。` +
+          (f
+            ? ` 两条路：①${f.reorder.title}——${f.reorder.detail} ②${f.shift.title}——${f.shift.detail}`
+            : '')
+      })
+    }
+  }
+
+  // ---- CHK-11 取整去重与边界 ----
+  {
+    out.push({
+      id: 'CHK-11',
+      title: `去重取整：坐标 mm（${POS_TOL_MM} 位小数）计算，按 ${POS_GRID_MM}mm 落格判同一处`,
+      pass: lashing.boundaryCount === 0,
+      value: lashing.boundaryCount === 0 ? '无贴边节点' : `${lashing.boundaryCount} 个节点贴边`,
+      detail:
+        `判定规则：三个坐标各自四舍五入到整数毫米，落格键 (gx,gy,gz) 相同才算同一处；` +
+        `小数部分落在 0.50±0.05mm 的为贴边节点（挪动 ${POS_TOL_MM}mm 就可能换格），共 ${lashing.boundaryCount} 个，现场需以 0.1mm 刻度对正；` +
+          `当前合并方式：${lashing.mode === 'position' ? `按空间位置合并（省扎道，相邻层间距 < ${MIN_LEVEL_GAP_MM}mm 落同格会并错，已由 CHK-10 拦截）` : '按交会篾组合合并（不并错，节点与扎道更多）'}。`
     })
   }
 
