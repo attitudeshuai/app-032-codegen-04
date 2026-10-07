@@ -8,6 +8,14 @@ import { buildFrame, type FrameResult } from './frame'
 import { buildPanels, panelNetArea, type PanelResult } from './panels'
 import { computeBatch, computeMaterials, type BatchMaterials, type SingleLightMaterials } from './materials'
 import { assertNoPanelSplit, paginate, type LoftOptions, type Sheet } from './paginate'
+import {
+  buildLashPlan,
+  compareModes,
+  lashOptionsFor,
+  POSITION_HALF_STEP_MM,
+  POSITION_STEP_MM,
+  type LashPlan
+} from './lashing'
 import { CRAFT } from './craft'
 
 export interface FullResult {
@@ -16,6 +24,10 @@ export interface FullResult {
   materials: SingleLightMaterials
   batch: BatchMaterials
   sheets: Sheet[]
+  /** 绑扎节点图（三处取数的同一份结果：预览 / 构件表 / 导出） */
+  lash: LashPlan
+  /** 两种合并方案对比（取舍用） */
+  lashCompare: ReturnType<typeof compareModes>
   checks: CheckResult[]
   elapsedMs: number
 }
@@ -30,9 +42,11 @@ export function computeAll(l: Lantern, loft: LoftOptions): FullResult {
   const materials = computeMaterials(l)
   const batch = computeBatch(materials, Math.max(1, Math.round(l.batchCount)), l.wasteRatio)
   const sheets = paginate(l, loft)
+  const lash = buildLashPlan(l, lashOptionsFor(l))
+  const lashCompare = compareModes(l, l.lashWrapWidthMm)
   const elapsedMs = performance.now() - t0
-  const checks = runChecks(l, frame, panels, materials, batch, sheets, elapsedMs)
-  return { frame, panels, materials, batch, sheets, checks, elapsedMs }
+  const checks = runChecks(l, frame, panels, materials, batch, sheets, elapsedMs, lash)
+  return { frame, panels, materials, batch, sheets, lash, lashCompare, checks, elapsedMs }
 }
 
 function runChecks(
@@ -42,11 +56,12 @@ function runChecks(
   materials: SingleLightMaterials,
   batch: BatchMaterials,
   sheets: Sheet[],
-  elapsedMs: number
+  elapsedMs: number,
+  lash: LashPlan
 ): CheckResult[] {
   const out: CheckResult[] = []
   const g = frame.geometry
-  const lash = Math.max(0, l.lashAllowanceMm)
+  const lashAllow = Math.max(0, l.lashAllowanceMm)
 
   // ---- CHK-01 几何：棱长/周长与手算一致 ----
   {
@@ -113,7 +128,7 @@ function runChecks(
   {
     const stock = frame.members.reduce((a, m) => a + m.lengthMm * m.qty, 0)
     const rawTotal = frame.members.reduce((a, m) => a + m.rawLengthMm * m.qty, 0)
-    const lashTotal = frame.members.reduce((a, m) => a + m.qty * m.lashJoints * lash, 0)
+    const lashTotal = frame.members.reduce((a, m) => a + m.qty * m.lashJoints * lashAllow, 0)
     const diff = stock - rawTotal
     const pass = stock >= rawTotal - 1e-6 && Math.abs(diff - lashTotal) <= 0.5
     out.push({
@@ -121,7 +136,7 @@ function runChecks(
       title: '备料守恒：Σ备料长度 ≥ Σ净长，且差值 = 余量总和',
       pass,
       value: `Σ备料 ${f1(stock)}mm / Σ净长 ${f1(rawTotal)}mm`,
-      detail: `差值 ${f1(diff)}mm，应等于余量总和 ${f1(lashTotal)}mm（竖篾两端、横篾圈接头各计 ${f1(lash)}mm）`
+      detail: `差值 ${f1(diff)}mm，应等于余量总和 ${f1(lashTotal)}mm（竖篾两端、横篾圈接头各计 ${f1(lashAllow)}mm）`
     })
   }
 
@@ -188,6 +203,74 @@ function runChecks(
       pass,
       value: `${elapsedMs.toFixed(1)}ms`,
       detail: `${l.divisions} 等分 × ${l.layers.length} 层：构件 ${frame.totalQty} 根、裁片 ${panels.totalQty} 块、图纸 ${sheets.length} 页，全流程耗时 ${elapsedMs.toFixed(1)}ms（含分页）`
+    })
+  }
+
+  // ---- CHK-09 绑扎节点：余量处数参与扎道，逐节点用线合计 = 扎线总量（差 1cm 也报红） ----
+  {
+    const jointsInNodes = lash.nodes.reduce((s, n) => s + n.jointCount, 0)
+    const tiesInSteps = lash.steps.reduce((s, st) => s + st.ties, 0)
+    const wireInSteps = lash.steps.reduce((s, st) => s + st.wireMm, 0)
+    const wireFromTies = lash.tieCount * CRAFT.lashPerJointM * 1000
+    const materialWireMm = materials.lashM * 1000
+    const errs = {
+      joints: jointsInNodes - lash.jointTotal,
+      ties: tiesInSteps - lash.tieCount,
+      wire: Math.abs(wireInSteps - lash.wireMm),
+      wireTies: Math.abs(lash.wireMm - wireFromTies),
+      wireMaterials: Math.abs(materialWireMm - lash.wireMm)
+    }
+    const pass =
+      errs.joints === 0 && errs.ties === 0 && errs.wire <= 1 && errs.wireTies <= 1 && errs.wireMaterials <= 1 && lash.schedulable
+    out.push({
+      id: 'CHK-09',
+      title: '绑扎节点守恒：余量处数全入账、Σ逐节点扎线 = 扎线总量（误差 ≤ 10mm）',
+      pass,
+      value: `${lash.nodeCount} 节点 / ${lash.tieCount} 道 / ${f3(lash.wireMm / 1000)}m`,
+      detail:
+        `构件表绑扎余量处数 ${lash.jointTotal}（= Σ qty×余量处数），逐节点登记的余量动作 ${jointsInNodes}；` +
+        `工步扎道 ${tiesInSteps} = 节点扎道 ${lash.tieCount}；逐工步用线合计 ${f1(wireInSteps)}mm = 节点总量 ${f1(lash.wireMm)}mm ` +
+        `= 扎道×每道 ${CRAFT.lashPerJointM.toFixed(2)}m ${f1(wireFromTies)}mm = 备料单扎线 ${f1(materialWireMm)}mm；` +
+        `位置取整 ${POSITION_STEP_MM.toFixed(1)}mm 档、去重边界 ±${POSITION_HALF_STEP_MM.toFixed(2)}mm（与构件表同档）`
+    })
+  }
+
+  // ---- CHK-10 工步先后：层序单调、同层绕线不压线、无互相卡住 ----
+  {
+    let layerMono = true
+    let prev = -1
+    for (const st of lash.steps) {
+      if (st.layer < prev) layerMono = false
+      prev = st.layer
+    }
+    const allPlaced = lash.steps.reduce((s, st) => s + st.nodes.length, 0) === lash.nodes.length
+    const pass = layerMono && allPlaced && lash.schedulable && lash.deadlocks.length === 0
+    out.push({
+      id: 'CHK-10',
+      title: '工步先后排得开：下层不完不上上层，同层绕线互不压住，无成环死锁',
+      pass,
+      value: lash.schedulable ? `${lash.steps.length} 步全排开` : `${lash.deadlocks.length} 处互相卡住`,
+      detail: lash.schedulable
+        ? `${lash.steps.length} 道工步自底盘圈向收口圈逐层排布，层序单调；同一工步内节点沿任一篾走向间距 ≥ ${lash.wrapWidthMm}mm，绕线不互相压住，可同时上。`
+        : `排不出先后：${lash.deadlocks.map((d) => d.reason).join('｜')} 两条路：A ${lash.deadlocks[0]?.routeA.title}（多 ${lash.deadlocks[0]?.routeA.extraTies} 道扎）；B ${lash.deadlocks[0]?.routeB.title}（多耗 ${lash.deadlocks[0]?.routeB.extraWireMm}mm 线）。`
+    })
+  }
+
+  // ---- CHK-11 三处同源：预览 / 构件表 / 导出共用同一份节点工步 ----
+  {
+    const memberTies = lash.members.reduce((s, m) => s + m.tiesTotal, 0)
+    // 构件表按参与篾根数分摊显示扎道，合计 = Σ 节点扎道 × 1（每节点参与篾分摊之和 = 1）
+    const pass = Math.abs(memberTies - lash.tieCount) <= 0.5
+    out.push({
+      id: 'CHK-11',
+      title: '三处同源：预览图、骨架构件表、导出工步清单取同一份节点与扎道',
+      pass,
+      value: `节点 ${lash.nodeCount} / 扎道 ${lash.tieCount} / 用线 ${f3(lash.wireMm / 1000)}m`,
+      detail:
+        `参数与预览页描点、构件表「参与节点/扎道/用线」列、CSV/打印工步清单均取自 buildLashPlan 同一结果（合并方式：${
+          lash.mode === 'space' ? '按空间位置合并' : '按交会篾组合合并'
+        }）；` +
+        `构件表分摊扎道合计 ${f1(memberTies)} = 扎道总数 ${lash.tieCount}；同一节点的位置、扎道数、用线量三处不许有出入。`
     })
   }
 

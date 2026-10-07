@@ -6,9 +6,10 @@ import { getLantern } from '../core/store'
 import { computeAll } from '../core/checks'
 import { DEFAULT_LOFT_OPTIONS } from '../core/paginate'
 import { groupMembers } from '../core/frame'
-import { kindName, membersCsv, downloadText } from '../core/exporter'
+import { kindName, membersCsv, downloadText, lashMembersCsv, lashStepsCsv, lashNodesCsv } from '../core/exporter'
 import { styleLabel } from '../core/craft'
 import type { FrameMember } from '../core/types'
+import type { MemberLashRow } from '../core/lashing'
 
 const route = useRoute()
 const router = useRouter()
@@ -20,6 +21,18 @@ const full = computed(() => {
 })
 const groups = computed(() => (full.value ? groupMembers(full.value.frame.members) : []))
 
+/** 构件绑扎用量行（取自绑扎节点图同一份结果） */
+const lashRowOf = computed(() => {
+  const map = new Map<string, MemberLashRow>()
+  if (full.value) for (const row of full.value.lash.members) map.set(row.memberId, row)
+  return map
+})
+
+const lashTotal = computed(() => {
+  const p = full.value?.lash
+  if (!p) return { ties: 0, wire: 0, nodes: 0 }
+  return { ties: p.members.reduce((s, m) => s + m.tiesTotal, 0), wire: p.members.reduce((s, m) => s + m.wireMmTotal, 0), nodes: p.nodeCount }
+})
 function bendText(m: FrameMember): string {
   if (m.bendRadiusMm) return `R${m.bendRadiusMm.toFixed(1)}mm`
   if (m.bendAngleDeg) return `${m.bendAngleDeg.toFixed(1)}°`
@@ -30,6 +43,20 @@ function exportCsv() {
   const l = lantern.value
   if (!l || !full.value) return
   downloadText(`${l.name}-构件清单.csv`, membersCsv(l, full.value.frame.members))
+}
+
+function exportLash() {
+  const l = lantern.value
+  if (!l || !full.value) return
+  downloadText(`${l.name}-构件绑扎用量.csv`, lashMembersCsv(l, full.value.lash))
+}
+
+function exportSteps() {
+  const l = lantern.value
+  const f = full.value
+  if (!l || !f) return
+  downloadText(`${l.name}-绑扎工步清单.csv`, lashStepsCsv(l, f.lash))
+  setTimeout(() => downloadText(`${l.name}-绑扎节点明细.csv`, lashNodesCsv(l, f.lash)), 150)
 }
 </script>
 
@@ -49,7 +76,9 @@ function exportCsv() {
       </div>
       <div class="ops">
         <button @click="exportCsv">导出构件清单 CSV</button>
-        <button class="primary" @click="router.push(`/print/${lantern.id}?view=frame`)">打印构件清单</button>
+        <button @click="exportLash">导出构件绑扎用量 CSV</button>
+        <button @click="exportSteps">导出绑扎工步清单 CSV</button>
+        <button class="primary" @click="router.push(`/lashing/${lantern.id}`)">看绑扎节点图与工步</button>
       </div>
     </section>
 
@@ -58,7 +87,17 @@ function exportCsv() {
       <div class="stat"><span>备料总长（含余量）</span><b>{{ (full.frame.stockLengthMm / 1000).toFixed(3) }} m</b></div>
       <div class="stat"><span>净长合计</span><b>{{ (full.frame.rawLengthMm / 1000).toFixed(3) }} m</b></div>
       <div class="stat"><span>绑扎余量合计</span><b>{{ full.frame.lashExtraMm.toFixed(1) }} mm</b></div>
+      <div class="stat"><span>绑扎节点（同源）</span><b>{{ full.lash.nodeCount }} 处</b></div>
+      <div class="stat"><span>扎道合计</span><b>{{ full.lash.tieCount }} 道</b></div>
+      <div class="stat"><span>扎线用量</span><b>{{ (full.lash.wireMm / 1000).toFixed(3) }} m</b></div>
+      <div class="stat"><span>合并方式</span><b style="font-size:12px">{{ full.lash.mode === 'space' ? '按空间位置' : '按篾组合' }}</b></div>
     </section>
+
+    <p class="same-source">
+      下表每行的「参与节点 / 分到扎道 / 用线」取自绑扎节点图同一份工步清单（共节点的一道扎按参与篾根数分摊，合计守恒：
+      表内扎道 {{ lashTotal.ties.toFixed(1) }} = 扎道总数 {{ full.lash.tieCount }}；表内用线 {{ lashTotal.wire.toFixed(1) }}mm =
+      节点用线总量 {{ full.lash.wireMm.toFixed(1) }}mm）。余量处数 ×{{ lantern.lashAllowanceMm }}mm 决定截取长度，余量处数同时参与扎道数计算。
+    </p>
 
     <section v-for="grp in groups" :key="grp.group" class="group">
       <h3>{{ grp.group }}</h3>
@@ -72,6 +111,9 @@ function exportCsv() {
             <th class="num">余量处数</th>
             <th class="num">数量</th>
             <th class="num">总截取长 (mm)</th>
+            <th class="num">单根参与节点</th>
+            <th class="num">单根分到扎道</th>
+            <th class="num">单根用线 (mm)</th>
             <th>弯曲半径 / 折角</th>
             <th>说明</th>
           </tr>
@@ -85,6 +127,9 @@ function exportCsv() {
             <td class="num mono">×{{ m.lashJoints }}</td>
             <td class="num mono">{{ m.qty }}</td>
             <td class="num mono">{{ (m.lengthMm * m.qty).toFixed(1) }}</td>
+            <td class="num mono lash-cell">{{ lashRowOf.get(m.id)?.nodesPer ?? '—' }}</td>
+            <td class="num mono lash-cell">{{ lashRowOf.get(m.id) ? lashRowOf.get(m.id)!.tiesPer.toFixed(2) : '—' }}</td>
+            <td class="num mono lash-cell">{{ lashRowOf.get(m.id) ? lashRowOf.get(m.id)!.wireMmPer.toFixed(1) : '—' }}</td>
             <td class="mono small">{{ bendText(m) }}</td>
             <td class="note">{{ m.note }}</td>
           </tr>
@@ -93,9 +138,9 @@ function exportCsv() {
     </section>
 
     <ChecksPanel
-      :checks="full.checks.filter((c) => ['CHK-01', 'CHK-02', 'CHK-04', 'CHK-08'].includes(c.id))"
+      :checks="full.checks.filter((c) => ['CHK-01', 'CHK-02', 'CHK-04', 'CHK-09', 'CHK-11', 'CHK-08'].includes(c.id))"
       :elapsed-ms="full.elapsedMs"
-      title="骨架计算自检"
+      title="骨架与绑扎节点自检"
     />
   </div>
 </template>
@@ -257,6 +302,21 @@ tr:last-child td {
   color: var(--ink-soft);
   font-size: 12px;
   max-width: 340px;
+}
+
+.lash-cell {
+  color: #8f1c19;
+  font-weight: 600;
+}
+
+.same-source {
+  margin: 0;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--ink-soft);
+  background: var(--surface-2);
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
 }
 
 .missing {

@@ -21,11 +21,11 @@ import {
   type SheetItemStrip
 } from '../core/paginate'
 import { groupMembers } from '../core/frame'
-import { kindName, shapeName } from '../core/exporter'
+import { kindName, lashStepsCsv, lashMembersCsv, downloadText, shapeName } from '../core/exporter'
 import { coveringLabel, kindLabel, styleLabel } from '../core/craft'
 import type { Panel } from '../core/types'
 
-type PrintMode = 'loft' | 'frame' | 'labels'
+type PrintMode = 'loft' | 'frame' | 'labels' | 'lashing'
 
 const route = useRoute()
 const router = useRouter()
@@ -33,7 +33,7 @@ const router = useRouter()
 const lantern = computed(() => getLantern(route.params.id as string))
 const mode = computed<PrintMode>(() => {
   const v = String(route.query.view || 'loft')
-  return v === 'frame' || v === 'labels' ? v : 'loft'
+  return v === 'frame' || v === 'labels' || v === 'lashing' ? v : 'loft'
 })
 
 const opts = reactive<LoftOptions>({ ...DEFAULT_LOFT_OPTIONS })
@@ -103,6 +103,14 @@ const labelPages = computed(() => {
 
 function setMode(m: PrintMode) {
   router.replace({ path: route.path, query: m === 'loft' ? {} : { view: m } })
+}
+
+function exportLashCsv() {
+  const l = lantern.value
+  const f = full.value
+  if (!l || !f) return
+  downloadText(`${l.name}-绑扎工步清单.csv`, lashStepsCsv(l, f.lash))
+  setTimeout(() => downloadText(`${l.name}-构件绑扎用量.csv`, lashMembersCsv(l, f.lash)), 150)
 }
 
 function doPrint() {
@@ -235,6 +243,7 @@ function today(): string {
       <div class="tabs">
         <button :class="{ on: mode === 'loft' }" @click="setMode('loft')">1:1 放样图</button>
         <button :class="{ on: mode === 'frame' }" @click="setMode('frame')">构件清单（可打印）</button>
+        <button :class="{ on: mode === 'lashing' }" @click="setMode('lashing')">绑扎工步清单</button>
         <button :class="{ on: mode === 'labels' }" @click="setMode('labels')">裁片标签</button>
       </div>
 
@@ -615,6 +624,73 @@ function today(): string {
         合计：构件 {{ full.frame.totalQty }} 根 · 备料（含余量）{{ (full.frame.stockLengthMm / 1000).toFixed(3) }}m ·
         净长 {{ (full.frame.rawLengthMm / 1000).toFixed(3) }}m · 绑扎余量合计
         {{ f1(full.frame.lashExtraMm) }}mm
+      </p>
+    </section>
+
+    <!-- ============ 绑扎工步清单（可打印） ============ -->
+    <section v-else-if="mode === 'lashing'" class="doc">
+      <div class="no-print lashing-ops">
+        <button class="primary" @click="doPrint">打印 / 另存为 PDF</button>
+        <button @click="exportLashCsv">导出工步 + 构件用量 CSV</button>
+      </div>
+      <h1>绑扎工步清单</h1>
+      <p class="doc-meta">
+        灯样：{{ lantern.name }}（{{ kindLabel(lantern.kind) }}）· {{ lantern.layers.length }} 层 · {{ lantern.sides }} 棱/母线 ·
+        节点合并：<b>{{ full.lash.mode === 'space' ? '按空间位置合并' : '按交会篾组合合并' }}</b> ·
+        缠裹宽度 {{ full.lash.wrapWidthMm }}mm · 位置取整 0.1mm（去重边界 ±0.05mm，与构件表同档）·
+        打印日期 {{ today() }}
+      </p>
+      <ul class="doc-rules">
+        <li v-for="(t, i) in [full.lash.rules.stepText, full.lash.rules.roundText, full.lash.rules.boundaryText, full.lash.rules.wireText]" :key="i">
+          {{ t }}
+        </li>
+      </ul>
+
+      <div v-if="!full.lash.schedulable" class="doc-deadlock">
+        <b>排不出先后（{{ full.lash.deadlocks.length }} 处互相卡住）：</b>
+        <div v-for="(d, di) in full.lash.deadlocks" :key="di" style="margin-top:6px">
+          <div>{{ d.reason }}</div>
+          <div>路 A：{{ d.routeA.title }}——{{ d.routeA.detail }}（代价 +{{ d.routeA.extraTies }} 道 / +{{ f1(d.routeA.extraWireMm) }}mm）</div>
+          <div>路 B：{{ d.routeB.title }}——{{ d.routeB.detail }}（代价 +{{ d.routeB.extraTies }} 道 / +{{ f1(d.routeB.extraWireMm) }}mm）</div>
+        </div>
+      </div>
+
+      <table class="doc-table lash-table">
+        <thead>
+          <tr>
+            <th>步</th>
+            <th>层</th>
+            <th>节点</th>
+            <th>类别</th>
+            <th class="num">X</th>
+            <th class="num">高度Y</th>
+            <th class="num">Z</th>
+            <th class="num">扎道</th>
+            <th class="num">本步用线(mm)</th>
+            <th>同一步可同时上 / 备注</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template v-for="st in full.lash.steps" :key="st.no">
+            <tr v-for="(n, k) in st.nodes" :key="n.id" :class="{ 'step-first': k === 0, suspicious: n.suspicious }">
+              <td v-if="k === 0" :rowspan="st.nodes.length" class="step-cell">{{ st.no }}</td>
+              <td v-if="k === 0" :rowspan="st.nodes.length">{{ st.layer + 1 }}</td>
+              <td class="mono">{{ n.id }}<span v-if="n.overrideDyMm" title="挪位节点">↕</span></td>
+              <td>{{ n.category === 'cross' ? '交会' : n.category === 'joint' ? '接头' : '交会+接头' }}</td>
+              <td class="num mono">{{ f1(n.pos.x) }}</td>
+              <td class="num mono">{{ f1(n.pos.y) }}</td>
+              <td class="num mono">{{ f1(n.pos.z) }}</td>
+              <td class="num mono">1</td>
+              <td v-if="k === 0" :rowspan="st.nodes.length" class="num mono strong">{{ f1(st.wireMm) }}</td>
+              <td class="note-cell">{{ k === 0 ? st.note : '' }}<span v-if="n.suspicious">（⚠ {{ n.suspiciousReason }}）</span></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+      <p class="doc-foot">
+        合计：{{ full.lash.nodeCount }} 处节点 · {{ full.lash.tieCount }} 道扎 · {{ f1(full.lash.wireMm) }}mm
+        = {{ (full.lash.wireMm / 1000).toFixed(3) }}m（= {{ full.lash.tieCount }} × 0.5m/道，逐节点合计一致）·
+        {{ full.lash.steps.length }} 道工步；构件表余量处数 {{ full.lash.jointTotal }} 已全部计入节点。
       </p>
     </section>
 
@@ -1016,6 +1092,51 @@ button.primary:hover {
   color: var(--ink-soft);
   border-bottom: 1px solid var(--line);
   padding-bottom: 8px;
+}
+
+.doc-rules {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  font-size: 11px;
+  color: var(--ink-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.doc-deadlock {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  background: #fdecea;
+  border: 1px solid #f2c7c1;
+  border-radius: 6px;
+  font-size: 11.5px;
+  color: #8f1c19;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lashing-ops {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.lash-table .step-cell {
+  background: #faf0e2;
+  font-weight: 700;
+  text-align: center;
+}
+
+.lash-table tr.suspicious td {
+  background: #fdf6e3;
+}
+
+.lash-table .note-cell {
+  font-size: 10px;
+  color: var(--ink-soft);
+  max-width: 320px;
 }
 
 .doc-table {

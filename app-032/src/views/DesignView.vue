@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import LanternPreview from '../components/LanternPreview.vue'
 import ChecksPanel from '../components/ChecksPanel.vue'
@@ -7,6 +7,7 @@ import { getLantern, distributeLayers, syncLayerDiameters } from '../core/store'
 import { computeAll } from '../core/checks'
 import { DEFAULT_LOFT_OPTIONS } from '../core/paginate'
 import { buildGeometry, polyhedronInfo, r1 } from '../core/geometry'
+import { diffPlans, type LashChangeReport, type LashPlan } from '../core/lashing'
 import { COVERINGS, CRAFT, coveringSpec, kindLabel } from '../core/craft'
 import { diameterFromPerimeter, diameterFromRib } from '../core/checks'
 import type { Lantern, Panel } from '../core/types'
@@ -26,6 +27,47 @@ const full = computed(() => {
   if (!l) return null
   return computeAll(l, loft.value)
 })
+
+const lash = computed<LashPlan | null>(() => full.value?.lash ?? null)
+
+// ---- 改棱数/层数：整张重排并列出三处变化（预览节点 / 构件表 / 工步清单） ----
+const lashReport = ref<LashChangeReport | null>(null)
+const lashReportReason = ref('')
+let lashBaseline: { sides: number; layerCount: number; plan: LashPlan } | null = null
+
+watch(
+  lash,
+  (p, oldPlan) => {
+    const l = lantern.value
+    if (!l || !p) return
+    if (!lashBaseline) {
+      lashBaseline = { sides: l.sides, layerCount: l.layers.length, plan: p }
+      return
+    }
+    const sidesChanged = l.sides !== lashBaseline.sides
+    const layersChanged = l.layers.length !== lashBaseline.layerCount
+    // 仅棱数/层数改动时出变化单；其它参数改动整张也重算，但不弹对比（避免与无关编辑混淆）
+    if ((sidesChanged || layersChanged) && oldPlan) {
+      lashReport.value = diffPlans(lashBaseline.plan, p, sidesChanged, layersChanged)
+      lashReportReason.value = `棱数 ${lashBaseline.sides} → ${l.sides}、层数 ${lashBaseline.layerCount} → ${l.layers.length}`
+      lashBaseline = { sides: l.sides, layerCount: l.layers.length, plan: p }
+    } else if (!sidesChanged && !layersChanged) {
+      lashBaseline = { sides: l.sides, layerCount: l.layers.length, plan: p }
+    }
+  },
+  { flush: 'post' }
+)
+
+function setLashMode(mode: 'space' | 'combo') {
+  const l = lantern.value
+  if (!l) return
+  l.lashMergeMode = mode
+  l.lashTrial = undefined
+}
+
+function dismissReport() {
+  lashReport.value = null
+}
 
 const geo = computed(() => (lantern.value ? buildGeometry(lantern.value) : null))
 const shoulderPct = computed(() => (geo.value ? ((geo.value.kTop + geo.value.kBot) * 100).toFixed(0) : '0'))
@@ -62,8 +104,7 @@ function onLayerCount(e: Event) {
   const l = lantern.value
   if (!l) return
   const n = Math.max(1, Math.min(12, Math.round(Number((e.target as HTMLInputElement).value) || 1)))
-  l.layers = Array.from({ length: n }, () => ({ heightMm: l.totalHeightMm / n, diameterMm: 0 }))
-  distributeLayers(l)
+  setLayerCount(n)
 }
 
 function onLayerHeight(i: number, e: Event) {
@@ -86,6 +127,16 @@ function setSides(e: Event) {
   const l = lantern.value
   if (!l) return
   l.sides = Math.max(3, Math.min(l.kind === 'revolution' ? 24 : 12, Math.round(Number((e.target as HTMLInputElement).value) || 3)))
+  // 改棱数：上一版解套试算作废，整张重排
+  l.lashTrial = undefined
+}
+
+function setLayerCount(n: number) {
+  const l = lantern.value
+  if (!l) return
+  l.layers = Array.from({ length: n }, () => ({ heightMm: l.totalHeightMm / n, diameterMm: 0 }))
+  distributeLayers(l)
+  l.lashTrial = undefined
 }
 
 // ---- 尺寸反推（§5） ----
@@ -331,10 +382,99 @@ function onCtrl(v: { which: 1 | 2; x: number; y: number }) {
         <LanternPreview
           :lantern="lantern"
           :mode="mode"
+          :lash="lash"
           interactive
           @update-ctrl="onCtrl"
         />
       </div>
+
+      <!-- 绑扎节点图：合并方式选择 + 三处同源总量 -->
+      <section v-if="lash" class="lash-box">
+        <header>
+          <h4>绑扎节点图（预览 / 构件表 / 导出同源）</h4>
+          <router-link :to="`/lashing/${lantern.id}`" class="more">看完整工步清单 →</router-link>
+        </header>
+        <div class="lash-controls">
+          <label class="merge-opt" :class="{ on: lantern.lashMergeMode === 'space' }">
+            <input type="radio" :checked="lantern.lashMergeMode === 'space'" @change="setLashMode('space')" />
+            <span>按空间位置合并</span>
+            <small>节点 {{ full?.lashCompare.space.nodeCount }} / 扎道 {{ full?.lashCompare.space.tieCount }} /
+              {{ ((full?.lashCompare.space.wireMm ?? 0) / 1000).toFixed(3) }}m / {{ full?.lashCompare.space.stepCount }} 步
+              · 相邻两层同位会并错（图上黄虚线圈）</small>
+          </label>
+          <label class="merge-opt" :class="{ on: lantern.lashMergeMode === 'combo' }">
+            <input type="radio" :checked="lantern.lashMergeMode === 'combo'" @change="setLashMode('combo')" />
+            <span>按交会篾组合合并</span>
+            <small>节点 {{ full?.lashCompare.combo.nodeCount }} / 扎道 {{ full?.lashCompare.combo.tieCount }} /
+              {{ ((full?.lashCompare.combo.wireMm ?? 0) / 1000).toFixed(3) }}m / {{ full?.lashCompare.combo.stepCount }} 步
+              · 不会并错，扎道明显多</small>
+          </label>
+        </div>
+        <div class="lash-nums">
+          <span>节点 <b>{{ lash.nodeCount }}</b></span>
+          <span>扎道 <b>{{ lash.tieCount }}</b></span>
+          <span>用线 <b>{{ (lash.wireMm / 1000).toFixed(3) }}m</b></span>
+          <span>工步 <b>{{ lash.steps.length }}</b></span>
+          <span :class="{ bad: !lash.schedulable }">{{ lash.schedulable ? '排得开' : `${lash.deadlocks.length} 处卡住` }}</span>
+        </div>
+        <p class="lash-rule">
+          图上彩点 = 交会节点（颜色随层）、黑圈 = 一道扎、黄虚线圈 = 空间合并可疑点；位置取整 0.1mm（去重边界 ±0.05mm，与构件表同档）。
+        </p>
+      </section>
+
+      <!-- 改棱数/层数后的三处变化单 -->
+      <section v-if="lashReport" class="diff-box">
+        <header>
+          <h4>整张重排 · {{ lashReportReason }}</h4>
+          <button @click="dismissReport">收起</button>
+        </header>
+        <div class="diff-totals">
+          节点 {{ lashReport.totals.before.nodes }} → {{ lashReport.totals.after.nodes }}；
+          扎道 {{ lashReport.totals.before.ties }} → {{ lashReport.totals.after.ties }}；
+          用线 {{ (lashReport.totals.before.wireMm / 1000).toFixed(3) }} → {{ (lashReport.totals.after.wireMm / 1000).toFixed(3) }}m；
+          工步 {{ lashReport.totals.before.steps }} → {{ lashReport.totals.after.steps }}
+        </div>
+        <div class="diff-cols">
+          <div>
+            <h5>① 预览图上挪了的节点（{{ lashReport.preview.moved.length }}）</h5>
+            <ul v-if="lashReport.preview.moved.length">
+              <li v-for="(mv, i) in lashReport.preview.moved.slice(0, 12)" :key="i">
+                <b>{{ mv.stableKey.slice(0, 18) }}{{ mv.stableKey.length > 18 ? '…' : '' }}</b>
+                第 {{ mv.layer + 1 }} 层：
+                ({{ mv.from.x.toFixed(1) }},{{ mv.from.y.toFixed(1) }},{{ mv.from.z.toFixed(1) }})
+                → ({{ mv.to.x.toFixed(1) }},{{ mv.to.y.toFixed(1) }},{{ mv.to.z.toFixed(1) }}) mm
+              </li>
+              <li v-if="lashReport.preview.moved.length > 12">…另 {{ lashReport.preview.moved.length - 12 }} 处</li>
+            </ul>
+            <p v-else>无</p>
+            <p class="dim">新增节点 {{ lashReport.preview.added.length }} 处 / 消失 {{ lashReport.preview.removed.length }} 处</p>
+          </div>
+          <div>
+            <h5>② 构件表里扎道/用线变了的篾（{{ lashReport.frame.length }}）</h5>
+            <ul v-if="lashReport.frame.length">
+              <li v-for="(fr, i) in lashReport.frame.slice(0, 12)" :key="i">
+                <b>{{ fr.memberLabel }}</b>：节点参与 {{ fr.nodesDelta >= 0 ? '+' : '' }}{{ fr.nodesDelta }}、
+                扎道 {{ fr.tiesDelta >= 0 ? '+' : '' }}{{ fr.tiesDelta.toFixed(1) }}、
+                用线 {{ fr.wireDeltaMm >= 0 ? '+' : '' }}{{ fr.wireDeltaMm.toFixed(1) }}mm
+              </li>
+              <li v-if="lashReport.frame.length > 12">…另 {{ lashReport.frame.length - 12 }} 行</li>
+            </ul>
+            <p v-else>无</p>
+          </div>
+          <div>
+            <h5>③ 工步清单里先后跟着换的（{{ lashReport.steps.length }}）</h5>
+            <ul v-if="lashReport.steps.length">
+              <li v-for="(st, i) in lashReport.steps.slice(0, 12)" :key="i">
+                <b>{{ st.stableKey.slice(0, 16) }}{{ st.stableKey.length > 16 ? '…' : '' }}</b>：
+                第 {{ st.fromNo ?? '—' }} 步 → 第 {{ st.toNo ?? '—' }} 步
+              </li>
+              <li v-if="lashReport.steps.length > 12">…另 {{ lashReport.steps.length - 12 }} 步</li>
+            </ul>
+            <p v-else>无</p>
+          </div>
+        </div>
+        <p class="dim">三处取数同源：变化单、预览描点、构件表、导出清单全部按重排后的同一份节点与扎道。</p>
+      </section>
 
       <div v-if="full" class="stats">
         <div class="stat"><span>构件总数</span><b>{{ full.frame.totalQty }}</b></div>
@@ -362,8 +502,7 @@ function onCtrl(v: { which: 1 | 2; x: number; y: number }) {
         </ul>
       </div>
 
-      <ChecksPanel v-if="full" :checks="full.checks" :elapsed-ms="full.elapsedMs" title="参数自检" />
-    </section>
+      <ChecksPanel v-if="full" :checks="full.checks" :elapsed-ms="full.elapsedMs" title="参数自检" />    </section>
   </div>
 </template>
 
@@ -662,5 +801,163 @@ button:hover {
   padding: 40px;
   text-align: center;
   color: var(--ink-soft);
+}
+
+/* 绑扎节点图小面板 */
+.lash-box {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  box-shadow: var(--shadow);
+}
+
+.lash-box header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.lash-box h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.more {
+  font-size: 12px;
+}
+
+.lash-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+@media (max-width: 900px) {
+  .lash-controls {
+    grid-template-columns: 1fr;
+  }
+}
+
+.merge-opt {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.merge-opt.on {
+  border-color: var(--red);
+  background: #fdf3f2;
+}
+
+.merge-opt input {
+  width: auto;
+  margin-right: 6px;
+}
+
+.merge-opt span {
+  font-weight: 600;
+}
+
+.merge-opt small {
+  color: var(--ink-soft);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.lash-nums {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 10px;
+  font-size: 12.5px;
+}
+
+.lash-nums b {
+  font-family: var(--mono);
+  font-size: 14px;
+}
+
+.lash-nums .bad {
+  color: var(--red);
+  font-weight: 700;
+}
+
+.lash-rule {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  color: var(--ink-soft);
+}
+
+/* 三处变化单 */
+.diff-box {
+  background: #fffdf6;
+  border: 1px solid #e2cf8f;
+  border-radius: 10px;
+  padding: 12px 14px;
+  box-shadow: var(--shadow);
+}
+
+.diff-box header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.diff-box h4 {
+  margin: 0;
+  font-size: 13.5px;
+  color: #8a6a14;
+}
+
+.diff-totals {
+  font-size: 12.5px;
+  font-family: var(--mono);
+  background: #f8f0dc;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 10px;
+}
+
+.diff-cols {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+@media (max-width: 1100px) {
+  .diff-cols {
+    grid-template-columns: 1fr;
+  }
+}
+
+.diff-cols h5 {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+}
+
+.diff-cols ul {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 11.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.diff-cols .dim,
+.diff-box .dim {
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  margin: 6px 0 0;
 }
 </style>

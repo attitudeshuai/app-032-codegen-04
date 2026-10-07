@@ -65,6 +65,8 @@ export function createFromPreset(presetId: string): Lantern {
     wasteRatio: coveringSpec(p.covering).wasteRatio,
     pageSize: 'A4',
     overlapMm: CRAFT.defaultOverlapMm,
+    lashMergeMode: 'space',
+    lashWrapWidthMm: CRAFT.lashWrapWidthMm,
     createdAt: now,
     updatedAt: now
   }
@@ -147,7 +149,14 @@ export function loadStore() {
     const raw = localStorage.getItem(KEY)
     if (raw) {
       const data = JSON.parse(raw) as { lanterns?: Lantern[] }
-      if (Array.isArray(data.lanterns)) state.lanterns = data.lanterns
+      if (Array.isArray(data.lanterns)) {
+        // 旧灯样迁移：补齐绑扎节点图参数（默认按空间位置合并）
+        for (const x of data.lanterns) {
+          if (x.lashMergeMode !== 'space' && x.lashMergeMode !== 'combo') x.lashMergeMode = 'space'
+          if (typeof x.lashWrapWidthMm !== 'number' || !(x.lashWrapWidthMm > 0)) x.lashWrapWidthMm = CRAFT.lashWrapWidthMm
+        }
+        state.lanterns = data.lanterns
+      }
     }
   } catch {
     state.storageError = '本地灯样数据损坏，已重置'

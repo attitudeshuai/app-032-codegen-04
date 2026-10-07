@@ -3,11 +3,16 @@
 import { computed, ref } from 'vue'
 import type { Lantern } from '../core/types'
 import { buildGeometry, radiusAtY, segmentInfos, topShoulder } from '../core/geometry'
+import type { LashPlan } from '../core/lashing'
 
 const props = defineProps<{
   lantern: Lantern
   mode: 'front' | 'top' | 'iso'
   interactive?: boolean
+  /** 绑扎节点图：传入则在灯体上描出每个节点与扎道（与工步清单同源的同一份结果） */
+  lash?: LashPlan | null
+  /** 高亮某一步（工步页联动用，可选） */
+  highlightStep?: number | null
 }>()
 const emit = defineEmits<{ (e: 'update-ctrl', v: { which: 1 | 2; x: number; y: number }): void }>()
 
@@ -99,6 +104,60 @@ const gridLines = computed(() => {
 })
 
 const shoulder = computed(() => topShoulder(props.lantern, g.value))
+
+// ---- 绑扎节点/扎道投影（三处同源：取自传入的 LashPlan，不在这里另算） ----
+const LASH_DOT_R = 2.4
+
+const layerColor = (layer: number): string => {
+  const colors = props.lantern.layerColors
+  return colors[Math.min(Math.max(0, layer), colors.length - 1)] || props.lantern.color
+}
+
+interface LashMarker {
+  key: string
+  id: string
+  stepNo: number | null
+  layer: number
+  color: string
+  category: string
+  suspicious: boolean
+  moved: boolean
+  blocked: boolean
+  front: { x: number; y: number; back: boolean }
+  top: { x: number; z: number }
+  iso: { X: number; Y: number }
+  note: string
+  dyMm?: number
+}
+
+const lashMarkers = computed<LashMarker[]>(() => {
+  const p = props.lash
+  if (!p) return []
+  const geo = g.value
+  const isoP = isoProjection.value
+  return p.nodes.map((n) => {
+    const frontX = FRONT_W.value / 2 + n.pos.x
+    const frontY = FRONT_H.value - PAD - n.pos.y
+    const topCx = (geo.maxR * 2 + PAD * 1.2) / 2
+    const q = isoP.proj(n.pos)
+    return {
+      key: n.id + n.posKey,
+      id: n.id,
+      stepNo: n.stepNo,
+      layer: n.layer,
+      color: layerColor(Math.min(n.layer, props.lantern.layers.length - 1)),
+      category: n.category,
+      suspicious: !!n.suspicious,
+      moved: !!n.overrideDyMm,
+      blocked: n.stepNo === null,
+      front: { x: frontX, y: frontY, back: n.pos.z < -0.05 },
+      top: { x: topCx + n.pos.x, z: topCx + n.pos.z },
+      iso: { X: q.X, Y: q.Y },
+      note: n.note,
+      dyMm: n.overrideDyMm
+    }
+  })
+})
 
 function clientToMm(evt: PointerEvent, el: SVGSVGElement) {
   const rect = el.getBoundingClientRect()
@@ -252,6 +311,56 @@ const isoPaths = computed(() => {
         />
       </g>
 
+      <!-- 绑扎节点与扎道（取自绑扎节点图同一份结果） -->
+      <g v-if="lashMarkers.length" class="lash-layer">
+        <!-- 背面（z<0）节点淡描 -->
+        <g class="lash-back">
+          <template v-for="m in lashMarkers.filter((x) => x.front.back)" :key="'b' + m.key">
+            <circle :cx="m.front.x" :cy="m.front.y" :r="LASH_DOT_R" :fill="m.color" />
+            <circle v-if="m.suspicious" :cx="m.front.x" :cy="m.front.y" :r="LASH_DOT_R + 1.6" class="suspicious-ring" />
+          </template>
+        </g>
+        <!-- 正面节点 -->
+        <g class="lash-front">
+          <template v-for="m in lashMarkers.filter((x) => !x.front.back)" :key="'f' + m.key">
+            <!-- 扎道：节点外一圈表示一道扎（含余量动作的混点画双圈） -->
+            <circle
+              :cx="m.front.x"
+              :cy="m.front.y"
+              :r="LASH_DOT_R + (m.category === 'cross' ? 1.1 : 2.2)"
+              :class="['tie-ring', { highlight: highlightStep != null && m.stepNo === highlightStep }]"
+              :stroke="m.blocked ? '#b3241f' : '#3b2a12'"
+            />
+            <circle :cx="m.front.x" :cy="m.front.y" :r="LASH_DOT_R" :fill="m.color" stroke="#3b2a12" stroke-width="0.4" />
+            <circle v-if="m.suspicious" :cx="m.front.x" :cy="m.front.y" :r="LASH_DOT_R + 3" class="suspicious-ring" />
+            <line v-if="m.blocked" :x1="m.front.x - 4" :x2="m.front.x + 4" :y1="m.front.y - 4" :y2="m.front.y + 4" class="blocked-x" />
+            <line v-if="m.blocked" :x1="m.front.x + 4" :x2="m.front.x - 4" :y1="m.front.y - 4" :y2="m.front.y + 4" class="blocked-x" />
+            <!-- 挪位节点：原高度虚影 + 箭头 -->
+            <line
+              v-if="m.dyMm"
+              :x1="m.front.x"
+              :x2="m.front.x"
+              :y1="m.front.y + m.dyMm"
+              :y2="m.front.y"
+              class="move-arrow"
+              marker-end="url(#lashArrow)"
+            />
+            <circle v-if="m.dyMm" :cx="m.front.x" :cy="m.front.y + m.dyMm" r="1.6" class="move-ghost" />
+            <text v-if="highlightStep != null && m.stepNo === highlightStep" :x="m.front.x + 4.5" :y="m.front.y - 3.5" class="lash-label">
+              {{ m.id }}
+            </text>
+          </template>
+        </g>
+        <text class="lash-legend" :x="8" :y="FRONT_H - 30">
+          ● 绑扎节点（颜色=所属层） ○ 一道扎 ⚠黄圈=空间合并可疑点 ✕红=卡住未排
+        </text>
+        <defs>
+          <marker id="lashArrow" markerWidth="6" markerHeight="6" refX="4" refY="3" orient="auto">
+            <path d="M0,0 L6,3 L0,6 Z" fill="#2f7a63" />
+          </marker>
+        </defs>
+      </g>
+
       <!-- 尺寸标注 -->
       <g class="dim">
         <line :x1="sx(-g.maxR)" :x2="sx(g.maxR)" :y1="FRONT_H - 16" :y2="FRONT_H - 16" />
@@ -347,6 +456,27 @@ const isoPaths = computed(() => {
               r="3"
             />
           </template>
+          <!-- 绑扎节点俯视：按层色描在各截面圈上 -->
+          <g v-if="lashMarkers.length" class="lash-plan">
+            <circle
+              v-for="m in lashMarkers"
+              :key="'p' + m.key"
+              :cx="m.top.x - (g.maxR * 2 + PAD * 1.2) / 2"
+              :cy="m.top.z - (g.maxR * 2 + PAD * 1.2) / 2"
+              :r="m.suspicious ? 2.8 : 2"
+              :fill="m.blocked ? '#b3241f' : m.color"
+              :stroke="m.category === 'cross' ? '#3b2a12' : 'none'"
+              stroke-width="0.5"
+            />
+            <circle
+              v-for="m in lashMarkers.filter((x) => x.suspicious)"
+              :key="'ps' + m.key"
+              :cx="m.top.x - (g.maxR * 2 + PAD * 1.2) / 2"
+              :cy="m.top.z - (g.maxR * 2 + PAD * 1.2) / 2"
+              r="4"
+              class="suspicious-ring"
+            />
+          </g>
         </g>
         <text :x="0" :y="-g.maxR - 16" text-anchor="middle" class="dim-text">
           俯视 · 外接 ⌀{{ (g.maxR * 2).toFixed(1) }}mm / {{ g.polygon ? g.n + ' 棱' : '旋转体' }}
@@ -375,6 +505,27 @@ const isoPaths = computed(() => {
         stroke="rgba(122,43,28,0.35)"
         stroke-width="0.5"
       />
+      <!-- 绑扎节点等轴测投影 -->
+      <g v-if="lashMarkers.length" class="lash-iso">
+        <circle
+          v-for="m in lashMarkers"
+          :key="'i' + m.key"
+          :cx="m.iso.X"
+          :cy="m.iso.Y"
+          :r="m.suspicious ? 2.8 : 2"
+          :fill="m.blocked ? '#b3241f' : m.color"
+          stroke="#3b2a12"
+          stroke-width="0.4"
+        />
+        <circle
+          v-for="m in lashMarkers.filter((x) => x.suspicious)"
+          :key="'is' + m.key"
+          :cx="m.iso.X"
+          :cy="m.iso.Y"
+          r="4"
+          class="suspicious-ring"
+        />
+      </g>
       <text :x="isoProjection.minX + 12" :y="isoProjection.minY + 16" class="dim-text">
         等轴测示意（骨架线框，非 3D 渲染）
       </text>
@@ -467,6 +618,70 @@ const isoPaths = computed(() => {
 
 .ribs circle {
   fill: #b3241f;
+}
+
+/* 绑扎节点（三处同源的 LashPlan 投影） */
+.lash-back circle {
+  fill-opacity: 0.28;
+  stroke: none;
+}
+
+.lash-front .tie-ring {
+  fill: none;
+  stroke: #3b2a12;
+  stroke-width: 0.55;
+}
+
+.lash-front .tie-ring.highlight {
+  stroke: #b3241f;
+  stroke-width: 1.2;
+}
+
+.lash-front circle {
+  stroke-opacity: 0.85;
+}
+
+.suspicious-ring {
+  fill: none;
+  stroke: #c88a12;
+  stroke-width: 0.7;
+  stroke-dasharray: 1.6 1.2;
+}
+
+.blocked-x {
+  stroke: #b3241f;
+  stroke-width: 0.9;
+}
+
+.move-arrow {
+  stroke: #2f7a63;
+  stroke-width: 0.6;
+}
+
+.move-ghost {
+  fill: none;
+  stroke: #2f7a63;
+  stroke-width: 0.4;
+  stroke-dasharray: 1 1;
+}
+
+.lash-label {
+  font-size: 6.5px;
+  fill: #b3241f;
+  font-weight: 700;
+}
+
+.lash-legend {
+  font-size: 7px;
+  fill: #6a5c52;
+}
+
+.lash-plan circle {
+  stroke-opacity: 0.8;
+}
+
+.lash-iso circle {
+  stroke-opacity: 0.8;
 }
 
 .dim-text {

@@ -8,6 +8,7 @@
     "divMin": 6,
     "divMax": 96,
     "lashPerJointM": 0.5,
+    "lashWrapWidthMm": 12,
     "led": {
       "perLiter": 0.35,
       "min": 12,

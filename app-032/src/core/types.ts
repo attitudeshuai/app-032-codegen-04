@@ -63,6 +63,15 @@ export interface Lantern {
   pageSize: PageSize
   /** 长条图跨页搭接量（mm） */
   overlapMm: number
+  /** 绑扎节点合并方式：space=按空间位置合并 / combo=按交会篾组合合并 */
+  lashMergeMode: 'space' | 'combo'
+  /** 每道扎线在篾上的缠裹宽度（mm）：同根篾上间距小于此值的两道扎不许同时上 */
+  lashWrapWidthMm: number
+  /** 解套试算（改绑扎次序 / 挪节点），为空表示按原排程；一旦换合并方式或改棱/层即作废 */
+  lashTrial?: {
+    overrides: { stableKey: string; dyMm: number }[]
+    forcedOrders: { beforeStableKey: string; afterStableKey: string }[]
+  }
   createdAt: string
   updatedAt: string
 }

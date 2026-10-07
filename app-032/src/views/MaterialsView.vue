@@ -108,7 +108,7 @@ function exportCsv() {
             <td class="num mono">{{ full.batch.coveringNetM2.toFixed(3) }} m²</td>
           </tr>
           <tr>
-            <td>扎线（{{ full.materials.lashJoints }} 处绑扎 × {{ CRAFT.lashPerJointM }}m/处）</td>
+            <td>扎线（绑扎节点图 {{ full.lash.nodeCount }} 处节点 / {{ full.lash.tieCount }} 道扎 × {{ CRAFT.lashPerJointM }}m/道，含构件表 {{ full.materials.lashJoints }} 处余量）</td>
             <td class="num mono">{{ full.materials.lashM.toFixed(3) }} m</td>
             <td class="num mono">{{ full.batch.lashM.toFixed(3) }} m</td>
           </tr>

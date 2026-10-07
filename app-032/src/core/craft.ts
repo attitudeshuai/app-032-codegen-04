@@ -45,7 +45,10 @@ export const CRAFT = raw.craft as {
   defaultDivisions: number
   divMin: number
   divMax: number
+  /** 每道扎线用量（m）：一处交会节点 = 一道扎 = 这么多线 */
   lashPerJointM: number
+  /** 每道扎线在篾上的缠裹宽度（mm）：同一根篾上间距小于此值的两道扎会互相压线 */
+  lashWrapWidthMm: number
   led: { perLiter: number; min: number; rule: string }
 }
 
